@@ -76,6 +76,9 @@ module Delayed
         opt.on('--exit-on-complete', 'Exit when no more jobs are available to run. This will exit if all jobs are scheduled to run in the future.') do
           @options[:exit_on_complete] = true
         end
+        opt.on('--kill-waittime=', 'Amount of time to wait to kill the process after sending the stop command') do |n|
+          @options[:force_kill_waittime] = n.to_i
+        end
       end
       @args = opts.parse!(args)
     end
@@ -84,37 +87,41 @@ module Delayed
       dir = @options[:pid_dir]
       Dir.mkdir(dir) unless File.exist?(dir)
 
+      threads = []
       if worker_pools
         setup_pools
       elsif @options[:identifier]
         if worker_count > 1
           raise ArgumentError, 'Cannot specify both --number-of-workers and --identifier'
         else
-          run_process("delayed_job.#{@options[:identifier]}", @options)
+          threads << Thread.new { run_process("delayed_job.#{@options[:identifier]}", @options) }
         end
       else
         worker_count.times do |worker_index|
           process_name = worker_count == 1 ? 'delayed_job' : "delayed_job.#{worker_index}"
-          run_process(process_name, @options)
+          threads << Thread.new { run_process(process_name, @options) }
         end
       end
+      threads.each { |thr| thr.join }
     end
 
     def setup_pools
       worker_index = 0
+      threads = []
       @worker_pools.each do |queues, worker_count|
         options = @options.merge(:queues => queues)
         worker_count.times do
           process_name = "delayed_job.#{worker_index}"
-          run_process(process_name, options)
+          threads << Thread.new { run_process(process_name, options) }
           worker_index += 1
         end
       end
+      threads.each { |thr| thr.join }
     end
 
     def run_process(process_name, options = {})
       Delayed::Worker.before_fork
-      Daemons.run_proc(process_name, :dir => options[:pid_dir], :dir_mode => :normal, :monitor => @monitor, :ARGV => @args) do |*_args|
+      Daemons.run_proc(process_name, :dir => options[:pid_dir], :dir_mode => :normal, :monitor => @monitor, :force_kill_waittime => @options[:force_kill_waittime], :ARGV => @args) do |*_args|
         $0 = File.join(options[:prefix], process_name) if @options[:prefix]
         run process_name, options
       end
@@ -136,7 +143,7 @@ module Delayed
       exit_with_error_status
     end
 
-  private
+    private
 
     def parse_worker_pool(pool)
       @worker_pools ||= []
